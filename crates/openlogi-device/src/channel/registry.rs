@@ -8,6 +8,7 @@ use crate::backend::NodeId;
 use hidpp::channel::HidppChannel;
 use tokio::sync::{Notify, watch};
 
+use crate::reprog_controls::ControlTables;
 use crate::{DeviceRoute, SharedChannel};
 
 struct Publication<Node, Channel> {
@@ -224,6 +225,7 @@ impl<Node: Eq, Channel> Registry<Node, Channel> {
 pub struct ChannelRegistry {
     inner: Registry<NodeId, Arc<HidppChannel>>,
     dead: Arc<DeadChannelReports>,
+    control_tables: ControlTables,
 }
 
 impl Default for ChannelRegistry {
@@ -231,6 +233,7 @@ impl Default for ChannelRegistry {
         Self {
             inner: Registry::new(Arc::ptr_eq),
             dead: Arc::default(),
+            control_tables: ControlTables::default(),
         }
     }
 }
@@ -262,6 +265,11 @@ impl DeadChannels {
 }
 
 impl ChannelRegistry {
+    /// The control tables remembered for the devices this registry serves.
+    pub(crate) fn control_tables(&self) -> &ControlTables {
+        &self.control_tables
+    }
+
     /// Replace every route published by `node`, preserving that node's original
     /// collision priority when it was already present.
     pub(crate) fn replace_node(

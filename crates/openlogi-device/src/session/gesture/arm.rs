@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use super::CaptureSpec;
 use super::main_wheel::{self, ArmedMainWheel, MainWheelDivert};
 use super::spy::{self, ArmedOnboard};
-use crate::reprog_controls::{self, ReprogControlsV4};
+use crate::reprog_controls::{self, ControlTables, ReprogControlsV4};
 use crate::session::capture::{ReportingChangeStream, open_device, subscribe_reporting_changes};
 use crate::session::capture_restore::{
     ArmedReporting, CaptureError, CaptureSessionFailure, HiResWheelRestore, PendingCaptureRestore,
@@ -27,7 +27,7 @@ use crate::session::restore::rollback_start;
 use crate::thumbwheel::{
     self, ReportingMode, Thumbwheel, ThumbwheelInfo, WheelDirection, WheelResolution,
 };
-use crate::{ChannelRegistry, SharedChannel};
+use crate::{ChannelRegistry, DeviceRoute, SharedChannel};
 
 /// The set of controls a session has diverted, kept so they can be handed back
 /// to the firmware on teardown.
@@ -256,7 +256,8 @@ pub(super) async fn arm_controls(
     let chan = shared.channel();
     let slot = shared.device_index();
     let mut armed = ArmedControls::default();
-    if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed).await {
+    let tables = Some((registry.control_tables(), shared.route()));
+    if let Err(error) = arm_controls_into(&device, chan, slot, spec, &mut armed, tables).await {
         let pending = armed.into_pending(shared);
         return Err(rollback_start(error, pending, registry).await);
     }
@@ -283,6 +284,7 @@ pub(super) async fn arm_controls_into(
     slot: u8,
     spec: &CaptureSpec,
     armed: &mut ArmedControls,
+    tables: Option<(&ControlTables, &DeviceRoute)>,
 ) -> Result<(), CaptureError> {
     if let Some(info) = device
         .root()
@@ -290,7 +292,7 @@ pub(super) async fn arm_controls_into(
         .await?
     {
         let rc = ReprogControlsV4::new(Arc::clone(chan), slot, info.index);
-        let controls = enumerate_controls(&rc).await?;
+        let controls = enumerate_controls(&rc, tables).await?;
         // Register an accessor before the first divert, so a failure on any
         // divert (including the first) can become a restore capability.
         armed.reprog = Some(rc.clone());
@@ -589,14 +591,19 @@ async fn read_hires_per_notch(
 }
 
 /// Read the device's full reprogrammable-control table in one pass, so we can
-/// test several CIDs without rescanning per control.
+/// test several CIDs without rescanning per control — from `tables` when the
+/// device on `route` was read before.
 pub(crate) async fn enumerate_controls(
     rc: &ReprogControlsV4,
-) -> Result<Vec<reprog_controls::CtrlIdInfo>, CaptureError> {
+    tables: Option<(&ControlTables, &DeviceRoute)>,
+) -> Result<Arc<[reprog_controls::CtrlIdInfo]>, CaptureError> {
+    if let Some((tables, route)) = tables {
+        return Ok(tables.read(route, rc).await?);
+    }
     let count = rc.get_count().await?;
     let mut controls = Vec::with_capacity(usize::from(count));
     for index in 0..count {
         controls.push(rc.get_ctrl_id_info(index).await?);
     }
-    Ok(controls)
+    Ok(controls.into())
 }

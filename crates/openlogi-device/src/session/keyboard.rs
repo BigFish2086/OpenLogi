@@ -176,7 +176,9 @@ async fn arm_keyboard(
             )
         });
     let table = match &controls {
-        Some(rc) => enumerate_controls(rc).await?,
+        Some(rc) => enumerate_controls(rc, Some((registry.control_tables(), shared.route())))
+            .await?
+            .to_vec(),
         None => Vec::new(),
     };
     // Subscribed before the first diversion write (see

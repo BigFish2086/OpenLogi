@@ -75,7 +75,7 @@ use crate::{
     ChannelPool, ChannelRegistry, DeviceIoGate, DeviceRoute, IoSuspended, SharedChannel,
     backend::BackendError,
     channel::registry::PublicationState,
-    reprog_controls::{self, ReprogControlsV4},
+    reprog_controls::{self, ControlTables, ReprogControlsV4},
 };
 
 /// Why an armed host-switch session is being stopped externally.
@@ -288,7 +288,15 @@ pub async fn run_host_switch_session(
         armed,
         controls_index,
         listener: key_listener,
-    } = match arm_host_keys(&mut device, &shared, position.announces, &trigger_tx).await {
+    } = match arm_host_keys(
+        &mut device,
+        &shared,
+        registry.control_tables(),
+        position.announces,
+        &trigger_tx,
+    )
+    .await
+    {
         Ok(host_keys) => host_keys,
         Err(failure) => {
             let (error, pending) = *failure;
@@ -362,6 +370,7 @@ type ArmFailure = (HostSwitchError, Option<PendingHostSwitchRestore>);
 async fn arm_host_keys(
     device: &mut Device,
     shared: &SharedChannel,
+    tables: &ControlTables,
     announces: bool,
     triggers: &mpsc::UnboundedSender<HostTrigger>,
 ) -> Result<ArmedHostKeys, Box<ArmFailure>> {
@@ -383,7 +392,7 @@ async fn arm_host_keys(
         shared.device_index(),
         feature.index,
     );
-    let host_keys = read_host_controls(&controls)
+    let host_keys = read_host_controls(&controls, tables, shared.route())
         .await
         .map_err(|error| Box::new((error, None)))?;
     let listener = (!host_keys.is_empty()).then(|| {
@@ -1224,18 +1233,19 @@ pub async fn prepare_host_switch(
 }
 
 /// The host keys among `controls`, each with the reporting it has before the
-/// session arms it. Only reads the keyboard.
+/// session arms it. Only reads the keyboard; its control table comes from
+/// `tables` when the keyboard on `route` was read before.
 async fn read_host_controls(
     controls: &ReprogControlsV4,
+    tables: &ControlTables,
+    route: &DeviceRoute,
 ) -> Result<Vec<ArmedControl>, HostSwitchError> {
-    let count = timed_hidpp("reading host control count", controls.get_count()).await?;
+    let table = tables
+        .read(route, controls)
+        .await
+        .map_err(|error| hidpp_error("reading host control information", error))?;
     let mut host_keys = Vec::new();
-    for index in 0..count {
-        let info = timed_hidpp(
-            "reading host control information",
-            controls.get_ctrl_id_info(index),
-        )
-        .await?;
+    for &info in table.iter() {
         let Some(host) = host_channel(info) else {
             continue;
         };

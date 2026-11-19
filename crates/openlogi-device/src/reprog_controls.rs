@@ -18,7 +18,8 @@
 //! Wire formats cross-checked against Solaar's `hidpp20.py` and
 //! `notifications.py`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use futures_lite::{Stream, StreamExt as _};
 use hidpp::{
@@ -26,6 +27,8 @@ use hidpp::{
     feature::{CreatableFeature, EmittingFeature as _, reprog_controls as hidpp_reprog},
     protocol::v20::Hidpp20Error,
 };
+
+use crate::DeviceRoute;
 
 mod event;
 
@@ -249,5 +252,158 @@ impl ReprogControlsV4 {
             | ReprogControlsEvent::AnalyticsKeyEvents(_)
             | ReprogControlsEvent::DivertedRawWheel { .. } => None,
         })
+    }
+}
+
+/// The control tables of directly connected devices, remembered for the life
+/// of the agent so a device returning from another host is not walked again.
+///
+/// A table is the model's and firmware's: no write changes it. Each read
+/// still asks the device for its row count, and a table is reused only for
+/// the same model whose feature index and row count match, so a firmware that
+/// reshapes the table is walked afresh. A device behind a receiver is never
+/// remembered: another one can be paired into its slot.
+#[derive(Clone, Default)]
+pub struct ControlTables(Arc<Mutex<HashMap<ControlTableKey, Arc<[CtrlIdInfo]>>>>);
+
+/// Model (vendor and product id), feature index, row count.
+type ControlTableKey = (u16, u16, u8, u8);
+
+impl ControlTables {
+    /// The control table of the device `rc` addresses on `route`: remembered,
+    /// or read row by row and remembered when `route` is direct.
+    pub(crate) async fn read(
+        &self,
+        route: &DeviceRoute,
+        rc: &ReprogControlsV4,
+    ) -> Result<Arc<[CtrlIdInfo]>, Hidpp20Error> {
+        let count = rc.get_count().await?;
+        let key = match route {
+            DeviceRoute::Direct {
+                vendor_id,
+                product_id,
+            } => Some((*vendor_id, *product_id, rc.feature_index(), count)),
+            _ => None,
+        };
+        if let Some(table) = key.and_then(|key| self.lock().get(&key).cloned()) {
+            return Ok(table);
+        }
+        let mut rows = Vec::with_capacity(usize::from(count));
+        for index in 0..count {
+            rows.push(rc.get_ctrl_id_info(index).await?);
+        }
+        let table: Arc<[CtrlIdInfo]> = rows.into();
+        if let Some(key) = key {
+            self.lock().insert(key, Arc::clone(&table));
+        }
+        Ok(table)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ControlTableKey, Arc<[CtrlIdInfo]>>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod control_table_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::channel::scripted::{ScriptedRawHidChannel, scripted_channel};
+
+    const FEATURE_INDEX: u8 = 2;
+
+    /// A fresh connection to a device whose control table has `rows` rows,
+    /// counting each row it is asked for in `row_reads`.
+    async fn connect(rows: u8, row_reads: &Arc<AtomicUsize>) -> ReprogControlsV4 {
+        let row_reads = Arc::clone(row_reads);
+        let (raw, _handle) = ScriptedRawHidChannel::with_dynamic_responder(move |request| {
+            let mut response = vec![0; 20];
+            response[..4].copy_from_slice(&request[..4]);
+            response[0] = 0x11;
+            match (request[2], request[3] >> 4) {
+                (FEATURE_INDEX, 0) => response[4] = rows,
+                (FEATURE_INDEX, 1) => {
+                    row_reads.fetch_add(1, Ordering::SeqCst);
+                    let cid = 0x00d0 + u16::from(request[4]);
+                    response[4..6].copy_from_slice(&cid.to_be_bytes());
+                }
+                _ => panic!("unexpected control-table request: {request:02x?}"),
+            }
+            Some(response)
+        });
+        ReprogControlsV4::new(scripted_channel(raw).await, 0xff, FEATURE_INDEX)
+    }
+
+    fn direct() -> DeviceRoute {
+        DeviceRoute::Direct {
+            vendor_id: 0x046d,
+            product_id: 0xb369,
+        }
+    }
+
+    /// A keyboard back from another host arrives on a new connection, and its
+    /// table is not walked again: only its row count is asked.
+    #[tokio::test]
+    async fn a_returning_direct_device_reuses_its_table() {
+        let tables = ControlTables::default();
+        let row_reads = Arc::new(AtomicUsize::new(0));
+
+        let first = tables
+            .read(&direct(), &connect(3, &row_reads).await)
+            .await
+            .unwrap();
+        let again = tables
+            .read(&direct(), &connect(3, &row_reads).await)
+            .await
+            .unwrap();
+
+        assert_eq!(row_reads.load(Ordering::SeqCst), 3);
+        assert_eq!(first, again);
+        assert_eq!(
+            again.iter().map(|row| row.cid).collect::<Vec<_>>(),
+            [0x00d0, 0x00d1, 0x00d2]
+        );
+    }
+
+    /// A row count that no longer matches — a firmware that reshaped the
+    /// table — is walked afresh.
+    #[tokio::test]
+    async fn a_changed_row_count_walks_the_table_again() {
+        let tables = ControlTables::default();
+        let row_reads = Arc::new(AtomicUsize::new(0));
+
+        tables
+            .read(&direct(), &connect(3, &row_reads).await)
+            .await
+            .unwrap();
+        let reshaped = tables
+            .read(&direct(), &connect(4, &row_reads).await)
+            .await
+            .unwrap();
+
+        assert_eq!(row_reads.load(Ordering::SeqCst), 7);
+        assert_eq!(reshaped.len(), 4);
+    }
+
+    /// A device behind a receiver is walked every time: another device can be
+    /// paired into its slot.
+    #[tokio::test]
+    async fn a_receiver_slot_is_never_remembered() {
+        let tables = ControlTables::default();
+        let row_reads = Arc::new(AtomicUsize::new(0));
+        let slot = DeviceRoute::Bolt {
+            receiver_uid: "DA2699E1".to_string(),
+            slot: 1,
+        };
+
+        for _ in 0..2 {
+            tables
+                .read(&slot, &connect(3, &row_reads).await)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(row_reads.load(Ordering::SeqCst), 6);
     }
 }
