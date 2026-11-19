@@ -3,7 +3,7 @@
 use std::fmt::Debug;
 
 use crate::{
-    channel::{ChannelError, HidppChannel},
+    channel::{AbandonedReply, ChannelError, HidppChannel},
     nibble::{self, U4},
 };
 
@@ -112,8 +112,18 @@ async fn determine_version_with(
 
         false
     };
+    // The protocol version is fixed for the connection, so a ping the link
+    // dropped may be re-asked and adopt an owed reply.
     let response = match completion {
-        WriteCompletion::Bounded => chan.send(msg.into(), matches).await,
+        WriteCompletion::Bounded => {
+            chan.send_with(
+                msg.into(),
+                matches,
+                crate::channel::SEND_RESPONSE_TIMEOUT,
+                AbandonedReply::AdoptIdentical,
+            )
+            .await
+        }
         WriteCompletion::Drain => {
             chan.send_write_through(msg.into(), matches, crate::channel::SEND_RESPONSE_TIMEOUT)
                 .await

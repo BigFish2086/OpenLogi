@@ -4,7 +4,10 @@
 use std::sync::Arc;
 
 use super::{CreatableFeature, Feature, FeatureEndpoint, FeatureType};
-use crate::{channel::HidppChannel, protocol::v20::Hidpp20Error};
+use crate::{
+    channel::{AbandonedReply, HidppChannel},
+    protocol::v20::Hidpp20Error,
+};
 
 /// Implements the `Root` / `0x0000` feature that every HID++2.0 device
 /// supports by default.
@@ -61,8 +64,14 @@ impl RootFeature {
     ) -> Result<Option<FeatureInformation>, Hidpp20Error> {
         let [id_hi, id_lo] = id.to_be_bytes();
         let args = [id_hi, id_lo, 0];
+        // A feature's index is fixed for the life of the connection, so a
+        // lookup the link dropped may be re-asked and adopt an owed reply.
         let response = match completion {
-            crate::protocol::WriteCompletion::Bounded => self.endpoint.call(0, args).await,
+            crate::protocol::WriteCompletion::Bounded => {
+                self.endpoint
+                    .call_with(0, args, AbandonedReply::AdoptIdentical)
+                    .await
+            }
             crate::protocol::WriteCompletion::Drain => {
                 self.endpoint.call_write_through(0, args).await
             }

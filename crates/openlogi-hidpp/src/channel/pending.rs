@@ -294,6 +294,21 @@ impl PendingQueue {
         resolution
     }
 
+    /// Records that the in-flight request with `id` is about to go out again
+    /// unanswered: one more reply is owed under its key, so whichever lands
+    /// first answers it and the rest are discarded as they would be for an
+    /// adopted re-ask. Returns `false` when the request is no longer in
+    /// flight — its reply already landed — and must not be sent again.
+    fn owe_another_reply(&mut self, id: u64) -> bool {
+        self.keys.iter_mut().any(|held| match &mut held.state {
+            KeyState::InFlight(in_flight) if in_flight.id == id => {
+                in_flight.extra_replies += 1;
+                true
+            }
+            KeyState::InFlight(_) | KeyState::Stale(_) => false,
+        })
+    }
+
     /// How many requests are awaiting their reply.
     pub(super) fn in_flight_count(&self) -> usize {
         self.keys
@@ -492,8 +507,15 @@ impl PendingRequest {
         }
     }
 
-    pub(super) async fn receive(mut self) -> Option<HidppMessage> {
+    /// Waits for the reply. Cancel-safe: dropping this future leaves the
+    /// request registered, and a later call still gets the reply.
+    pub(super) async fn receive(&mut self) -> Option<HidppMessage> {
         (&mut self.receiver).await.ok()
+    }
+
+    /// See [`PendingQueue::owe_another_reply`].
+    pub(super) fn owe_another_reply(&self) -> bool {
+        lock(&self.pending_messages).owe_another_reply(self.id)
     }
 }
 

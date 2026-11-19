@@ -1,6 +1,6 @@
 //! Channel tests: the shared fixtures, and one module per area.
 
-use super::mock::{MockRawHidChannel, channel_with_reader};
+use super::mock::{MockRawHidChannel, MockRawHidHandle, channel_with_reader};
 use super::*;
 use std::{
     sync::{

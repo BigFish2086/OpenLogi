@@ -116,8 +116,27 @@ pub enum AbandonedReply {
     /// the two asks — a lookup in a device's feature table, which is fixed
     /// for the life of the connection. A re-ask then costs no grace wait,
     /// which is what keeps a feature walk over a lossy link moving.
+    ///
+    /// For the same reason the channel itself re-asks such a request once if
+    /// it stays unanswered for [`UNANSWERED_RESEND_AFTER`].
     AdoptIdentical,
 }
+
+/// How long a request under [`AbandonedReply::AdoptIdentical`] waits for its
+/// reply before the channel sends it a second and last time; the request's own
+/// timeout still bounds the whole wait.
+///
+/// A link can lose a single request or reply outright: Windows' Bluetooth LE
+/// HID stack was traced losing one root `getFeature` while the keyboard
+/// answered every other request within 70 ms. Waiting out
+/// [`SEND_RESPONSE_TIMEOUT`] for it also stalls every request parked behind
+/// its header, and their callers time out together. Re-asking is safe only
+/// because the answer cannot have changed; the replies to every send are owed
+/// under the key, so the first answers and the rest are discarded. A second
+/// sits well above the slowest reply seen from a live device — a receiver
+/// answering a few hundred milliseconds late — so a slow answer is not
+/// duplicated.
+pub const UNANSWERED_RESEND_AFTER: Duration = Duration::from_secs(1);
 
 type MessageListener = Arc<dyn Fn(HidppMessage, bool) + Send + Sync + 'static>;
 
@@ -573,7 +592,7 @@ impl HidppChannel {
         let completion = {
             let mut request = std::pin::pin!(
                 async move {
-                    let pending_request = PendingRequest::register_when_key_free(
+                    let mut pending_request = PendingRequest::register_when_key_free(
                         pending_id,
                         Arc::clone(&self.pending_messages),
                         msg,
@@ -581,16 +600,44 @@ impl HidppChannel {
                         response_predicate,
                     )
                     .await;
-                    if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await {
-                        // Dropping the request abandons it as a timeout would;
-                        // `PendingQueue::abandon` says why a failed write still
-                        // leaves its header reserved.
-                        return PendingRequestCompletion::WriteFailed(error);
+                    trace!(dev, feat, func, "hidpp request registered");
+                    let mut attempt = 1_u32;
+                    loop {
+                        if let Err(error) = self.write_hidpp_report(msg, Some(pending_id)).await
+                        {
+                            // Dropping the request abandons it as a timeout
+                            // would; `PendingQueue::abandon` says why a failed
+                            // write still leaves its header reserved.
+                            return PendingRequestCompletion::WriteFailed(error);
+                        }
+                        trace!(dev, feat, func, attempt, "hidpp request written");
+                        let reply = if abandoned == AbandonedReply::AdoptIdentical && attempt == 1 {
+                            let mut reply = std::pin::pin!(pending_request.receive().fuse());
+                            select! {
+                                reply = reply => Some(reply),
+                                () = futures_timer::Delay::new(UNANSWERED_RESEND_AFTER).fuse() => None,
+                            }
+                        } else {
+                            Some(pending_request.receive().await)
+                        };
+                        if let Some(reply) = reply {
+                            return reply.map_or(
+                                PendingRequestCompletion::NoResponse,
+                                PendingRequestCompletion::Response,
+                            );
+                        }
+                        // The reply may have landed just as the wait ran out;
+                        // the next pass then takes it instead of re-asking.
+                        if pending_request.owe_another_reply() {
+                            attempt += 1;
+                            trace!(dev, feat, func, attempt, "hidpp request unanswered — re-asking");
+                        } else {
+                            return pending_request.receive().await.map_or(
+                                PendingRequestCompletion::NoResponse,
+                                PendingRequestCompletion::Response,
+                            );
+                        }
                     }
-                    pending_request.receive().await.map_or(
-                        PendingRequestCompletion::NoResponse,
-                        PendingRequestCompletion::Response,
-                    )
                 }
                 .fuse()
             );
@@ -636,7 +683,7 @@ impl HidppChannel {
 
         let pending_id = self.pending_message_id.fetch_add(1, Ordering::SeqCst);
         let observation = RequestObservation::new(self.observer.as_deref(), pending_id);
-        let pending_request = PendingRequest::register_when_key_free(
+        let mut pending_request = PendingRequest::register_when_key_free(
             pending_id,
             Arc::clone(&self.pending_messages),
             msg,

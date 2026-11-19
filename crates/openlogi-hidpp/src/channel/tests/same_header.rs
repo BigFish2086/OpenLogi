@@ -470,3 +470,97 @@ fn same_header_requests_are_answered_in_order() {
         assert_pending_empty(&channel);
     });
 }
+
+/// Polls `request` until `handle` has seen `count` writes, or panics after
+/// `within`.
+async fn poll_until_written<F: Future + Unpin>(
+    request: &mut F,
+    handle: &MockRawHidHandle,
+    count: usize,
+    within: Duration,
+) {
+    let started = Instant::now();
+    while handle.written_reports().len() < count {
+        assert!(
+            started.elapsed() < within,
+            "{count} writes not seen within {within:?}"
+        );
+        assert!(futures::poll!(&mut *request).is_pending());
+        futures_timer::Delay::new(Duration::from_millis(20)).await;
+    }
+}
+
+/// A query of immutable state that stays unanswered is re-asked after
+/// [`UNANSWERED_RESEND_AFTER`] instead of waiting out its whole timeout: a
+/// Bluetooth LE keyboard on Windows was traced losing one root `getFeature`
+/// while answering everything else, and every caller parked behind that
+/// header timed out with it. Both sends are owed a reply, so the first to land
+/// answers and the other is discarded rather than handed to the next request
+/// with the header.
+#[test]
+fn an_unanswered_immutable_query_is_re_asked_and_its_extra_reply_discarded() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = channel_with_reader(raw).await;
+
+        let reply = short_msg(0x11);
+        let mut request = Box::pin(channel.send_with(
+            short_msg(0x10),
+            move |candidate| *candidate == reply,
+            SEND_RESPONSE_TIMEOUT,
+            AbandonedReply::AdoptIdentical,
+        ));
+        poll_until_written(&mut request, &handle, 1, Duration::from_millis(200)).await;
+        poll_until_written(
+            &mut request,
+            &handle,
+            2,
+            UNANSWERED_RESEND_AFTER + Duration::from_millis(500),
+        )
+        .await;
+        let written = handle.written_reports();
+        assert_eq!(written[0], written[1], "the re-ask is not the same request");
+        assert_eq!(pending_len(&channel), 1);
+
+        handle.send_incoming(reply).await;
+        assert_eq!(request.await.unwrap(), reply);
+        assert_pending_empty(&channel);
+        assert_eq!(
+            stale_len(&channel),
+            1,
+            "the second send's reply is not owed"
+        );
+
+        handle.send_incoming(reply).await;
+        let started = Instant::now();
+        while stale_len(&channel) > 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "the extra reply was not discarded"
+            );
+            futures_timer::Delay::new(Duration::from_millis(10)).await;
+        }
+        assert_eq!(handle.written_reports().len(), 2);
+    });
+}
+
+/// Only a query of immutable state is re-asked: sending anything else twice
+/// could repeat a write, or answer a read with a value from before one.
+#[test]
+fn a_quarantined_request_is_never_re_asked() {
+    futures::executor::block_on(async {
+        let (raw, handle) = MockRawHidChannel::new();
+        let channel = channel_with_reader(raw).await;
+
+        let err = channel
+            .send_with_timeout(
+                short_msg(0x10),
+                |_| true,
+                UNANSWERED_RESEND_AFTER + Duration::from_millis(300),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ChannelError::Timeout));
+        assert_eq!(handle.written_reports().len(), 1);
+    });
+}

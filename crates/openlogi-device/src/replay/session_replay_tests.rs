@@ -347,11 +347,12 @@ async fn capture_replay_failed_wake_discovery_restores_before_retry() {
                 armed_flags,
                 restored_flags,
             );
-            let lookup = cassette
+            let position = cassette
                 .exchanges
-                .iter_mut()
-                .find(|exchange| exchange.request == root_feature_lookup_request(0x1d4b))
+                .iter()
+                .position(|exchange| exchange.request == root_feature_lookup_request(0x1d4b))
                 .expect("capture probes the wake feature");
+            let lookup = &mut cassette.exchanges[position];
             lookup.response = if timeout {
                 None
             } else {
@@ -360,6 +361,12 @@ async fn capture_replay_failed_wake_discovery_restores_before_retry() {
                     0x09,
                 ))
             };
+            if timeout {
+                // An unanswered feature lookup is asked once more before it
+                // times out (`hidpp::channel::UNANSWERED_RESEND_AFTER`).
+                let re_ask = cassette.exchanges[position].clone();
+                cassette.exchanges.insert(position + 1, re_ask);
+            }
             let replay = ArmedReplay::enumerate(cassette).await;
             let (sink, _captured) = mpsc::unbounded_channel();
             let (_shutdown, host) = replay.host(sink);

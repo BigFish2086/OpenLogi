@@ -21,7 +21,8 @@ use crate::{
 /// either function answers. Both therefore adopt a reply still owed to an
 /// abandoned identical ask ([`AbandonedReply::AdoptIdentical`]), so a walk
 /// that re-asks for an entry the link dropped is not held for the channel's
-/// stale-reply grace on every retry — the one place that trade is sound.
+/// stale-reply grace on every retry. Root `getFeature` and the protocol ping
+/// make the same trade for the same reason.
 #[derive(Clone, Feature)]
 #[creatable(id = 0x0001, version = 0)]
 pub struct FeatureSetFeature {
