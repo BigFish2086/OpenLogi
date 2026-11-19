@@ -6031,9 +6031,8 @@ dependencies = [
 
 [[package]]
 name = "openlogi-async-hid"
-version = "0.5.3-openlogi.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "883f2f413df036fd1b943bcd99d83cb0cfd76d0dc2586a16773f6d9aee1f5887"
+version = "0.5.3-openlogi.2"
+source = "git+https://github.com/AprilNEA/async-hid?rev=644340fa0e50832f9f98ff2e44554aa11395ae0e#644340fa0e50832f9f98ff2e44554aa11395ae0e"
 dependencies = [
  "async-io",
  "atomic-waker",
