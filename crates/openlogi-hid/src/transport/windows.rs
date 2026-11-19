@@ -158,6 +158,21 @@ fn copy_report(src: &[u8], len: usize, dst: &mut [u8]) -> HidResult<usize> {
     Ok(len)
 }
 
+/// Experiment switch: `OPENLOGI_WIN_SET_OUTPUT_REPORT` set sends every output
+/// report with `HidD_SetOutputReport` instead of async-hid's `WriteFile`, to
+/// test whether Bluetooth LE requests stop going unanswered.
+#[cfg(target_os = "windows")]
+fn set_output_report_experiment() -> bool {
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        let enabled = std::env::var_os("OPENLOGI_WIN_SET_OUTPUT_REPORT").is_some();
+        if enabled {
+            tracing::warn!("experiment: output reports go through HidD_SetOutputReport");
+        }
+        enabled
+    });
+    *ENABLED
+}
+
 /// One collection's output path: the async-hid writer, with the native Win32
 /// fallback beside it.
 #[cfg(target_os = "windows")]
@@ -177,6 +192,13 @@ impl ReportWriter {
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut writer = self.writer.lock().await;
+        if set_output_report_experiment()
+            && let Some(native_writer) = &self.native_writer
+        {
+            // Holds the writer lock, so writes stay serialised as before.
+            native_writer.set_output_report_only(src)?;
+            return Ok(src.len());
+        }
         if let Err(e) = writer.write_output_report(src).await {
             // The native fallback works around async-hid write quirks on a
             // *live* device; reopening a device that is gone can only fail, and

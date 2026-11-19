@@ -31,6 +31,17 @@ impl NativeHidWriter {
         nul_terminated_path(info).map(|path| Self { path })
     }
 
+    /// Experiment: write `report` with `HidD_SetOutputReport` alone, padded to
+    /// the collection's output length, on a handle opened for this write.
+    pub(crate) fn set_output_report_only(&self, report: &[u8]) -> Result<(), NativeHidError> {
+        let handle = HidHandle::open(&self.path, GENERIC_READ | GENERIC_WRITE)
+            .map_err(|e| NativeHidError::LastOsError("CreateFileW", e))?;
+        let caps = handle.caps()?;
+        let len = usize::from(caps.OutputReportByteLength).max(report.len());
+        set_output_report(handle.raw(), &padded_report(report, len))
+            .map_err(|e| NativeHidError::LastOsError("HidD_SetOutputReport", e))
+    }
+
     pub(crate) fn write_report(&self, report: &[u8]) -> Result<(), NativeHidError> {
         let mut errors = Vec::new();
         for desired_access in [GENERIC_READ | GENERIC_WRITE, GENERIC_WRITE, 0] {
