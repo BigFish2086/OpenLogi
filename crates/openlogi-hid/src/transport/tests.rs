@@ -148,3 +148,39 @@ fn granted_open_hint_names_the_exclusive_holders() {
 fn a_test_binary_is_not_the_agent() {
     assert!(!process_is_agent());
 }
+
+/// Windows reports no HID serial for a Bluetooth LE device, so the address is
+/// read from its device path; without it the probe cache cannot recognise the
+/// device when it returns from another host. Paths as Windows 11 lists them
+/// for an MX Keys Mini and an MX Master 4.
+#[test]
+fn reads_the_bluetooth_address_from_a_windows_hid_over_gatt_path() {
+    assert_eq!(
+        ble_address_from_path(
+            r"\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02046d_PID&b369_REV&0007_df79f9294d68&Col03#9&148b8d71&0&0002#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        .as_deref(),
+        Some("df:79:f9:29:4d:68")
+    );
+    assert_eq!(
+        ble_address_from_path(
+            r"\\?\HID#{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&02046D_PID&B042_REV&0017_D1CA2AA2FFE5#9&2f06cdb&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        .as_deref(),
+        Some("d1:ca:2a:a2:ff:e5")
+    );
+}
+
+/// Only a HID-over-GATT path names an address; a receiver's USB path and a
+/// truncated or non-hex tail yield nothing rather than a wrong identity.
+#[test]
+fn other_paths_yield_no_bluetooth_address() {
+    for path in [
+        r"\\?\HID#VID_046D&PID_C548&MI_02&Col02#7&2b1e5c1a&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+        r"\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02046d_PID&b369_REV&0007_df79f9294d&Col03#9",
+        r"\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02046d_PID&b369_REV&0007_df79f9294dzz&Col03#9",
+        r"\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02046d_PID&b369",
+    ] {
+        assert_eq!(ble_address_from_path(path), None, "{path}");
+    }
+}

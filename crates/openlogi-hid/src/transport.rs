@@ -135,9 +135,52 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
             usage_id: info.usage_id,
             name: info.name.clone(),
             manufacturer: info.manufacturer.clone(),
-            serial_number: info.serial_number.clone(),
+            serial_number: info
+                .serial_number
+                .clone()
+                .filter(|serial| !serial.is_empty())
+                .or_else(|| bluetooth_le_address(info)),
         }
     }
+}
+
+/// The Bluetooth address of a Bluetooth LE node, which Linux reports as the
+/// HID serial (`HID_UNIQ`) but Windows does not: there the serial string is
+/// empty and the address is only in the device path.
+#[cfg(target_os = "windows")]
+fn bluetooth_le_address(info: &DeviceInfo) -> Option<String> {
+    // `DeviceId` is `#[non_exhaustive]`, so even Windows' only variant needs
+    // the fallback arm.
+    let async_hid::DeviceId::UncPath(path) = &info.id else {
+        return None;
+    };
+    ble_address_from_path(&path.to_string_lossy())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn bluetooth_le_address(_info: &DeviceInfo) -> Option<String> {
+    None
+}
+
+/// Reads the address out of a Windows HID-over-GATT device path, written the
+/// way Linux reports it (`df:79:f9:29:4d:68`). Observed on Windows 11:
+/// `\\?\HID#{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02046d_PID&b369_REV&0007_df79f9294d68&Col03#…`
+/// — the 12 hex digits after the revision are the address.
+#[cfg(any(target_os = "windows", test))]
+fn ble_address_from_path(path: &str) -> Option<String> {
+    const HID_OVER_GATT: &str = "{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&";
+    const REVISION: &str = "_rev&";
+    let path = path.to_ascii_lowercase();
+    let rest = &path[path.find(HID_OVER_GATT)? + HID_OVER_GATT.len()..];
+    let rest = &rest[rest.find(REVISION)? + REVISION.len()..];
+    let (_revision, rest) = rest.split_once('_')?;
+    let address = rest.get(..12)?;
+    let terminated = matches!(rest.as_bytes().get(12), Some(b'&' | b'#'));
+    if !terminated || !address.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let octets: Vec<&str> = (0..6).map(|i| &address[i * 2..i * 2 + 2]).collect();
+    Some(octets.join(":"))
 }
 
 /// The software id the Linux kernel's `hid-logitech-hidpp` driver puts on
