@@ -72,7 +72,7 @@ pub(super) async fn probe_direct(
             pid = format_args!("{:04x}", info.product_id),
             "channel disconnected — failed probe, keeping last-known identity"
         );
-        return failed_probe(info);
+        return failed_probe(info, &channel);
     }
     let id = direct_cache_key(info);
     let cached = pass.cache.get(&id);
@@ -139,7 +139,7 @@ pub(super) async fn probe_direct(
             pid = format_args!("{:04x}", info.product_id),
             "feature walk did not complete — transient probe failure, keeping last-known identity"
         );
-        return failed_probe(info);
+        return failed_probe(info, &channel);
     }
     if !is_peripheral {
         debug!(
@@ -207,12 +207,17 @@ fn rejected_node() -> NodeProbe {
 }
 
 /// A probe that could not check the node. The ledger replays its last-good
-/// inventory and counts the failure toward retiring the channel; the cache
-/// entry is kept so the device's identity survives the outage.
-fn failed_probe(info: &NodeInfo) -> NodeProbe {
+/// inventory and counts the failure toward retiring the channel — at once when
+/// the transport reports the channel disconnected; the cache entry is kept so
+/// the device's identity survives the outage.
+fn failed_probe(info: &NodeInfo, channel: &HidppChannel) -> NodeProbe {
     NodeProbe {
         inventory: None,
-        verdict: ProbeVerdict::Failed,
+        verdict: if channel.is_connected() {
+            ProbeVerdict::Failed
+        } else {
+            ProbeVerdict::Disconnected
+        },
         outcomes: vec![seen(Some(direct_cache_key(info)))],
     }
 }

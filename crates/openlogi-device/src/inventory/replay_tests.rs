@@ -483,7 +483,8 @@ async fn reopening_a_channel_the_agent_saw_go_offline_reports_no_replacement() {
 /// node never leaves the OS listing while its handle is dead. Node-vanish
 /// retirement cannot fire, and a still-fresh cached probe asks the device
 /// nothing: the transport's disconnect is the only evidence left, and the
-/// probe must report it so the ledger retires the channel.
+/// probe must report it so the ledger retires the channel — on the first
+/// failure, since a disconnected handle can never answer again.
 #[tokio::test]
 async fn disconnected_direct_channel_replays_last_good_then_opens_a_replacement() {
     let fixture = direct_fixture(OpenOutcome::Hidpp, 1);
@@ -515,17 +516,13 @@ async fn disconnected_direct_channel_replays_last_good_then_opens_a_replacement(
     backend
         .set_channel_connection(DIRECT_CHANNEL, ChannelConnection::Disconnected)
         .expect("known channel");
-    let first_failure = enumerator.enumerate().await.expect("failed probe replays");
-    assert_eq!(first_failure, std::slice::from_ref(&expected));
-    assert!(enumerator.ledger.contains_last_good(&node_id));
-    assert!(!stale.channel().is_connected());
-    assert!(registry.is_current(&stale));
-
-    let second_failure = enumerator
+    let failure = enumerator
         .enumerate()
         .await
-        .expect("second failed probe retires");
-    assert_eq!(second_failure, std::slice::from_ref(&expected));
+        .expect("failed probe replays and retires");
+    assert_eq!(failure, std::slice::from_ref(&expected));
+    assert!(enumerator.ledger.contains_last_good(&node_id));
+    assert!(!stale.channel().is_connected());
     assert!(
         enumerator.channels.is_retiring(&node_id),
         "a disconnected direct channel must be retired, not served from the probe cache"

@@ -39,6 +39,11 @@ const NODE_MISS_GRACE: u8 = 3;
 /// and node-vanish eviction never fires for a node the OS keeps listing.
 const CHANNEL_EVICT_AFTER: u8 = 2;
 
+/// Failed probes on a channel whose transport reported its connection gone
+/// before it is reopened. The threshold above guards against retiring a slow
+/// but working channel; a disconnected one can never answer, so one is proof.
+const DISCONNECTED_EVICT_AFTER: u8 = 1;
+
 /// Consecutive arrival-replay failures tolerated after the receiver answered
 /// its pairing-count register. This path gets a longer channel grace because
 /// it proves the transport is responsive, but cannot be trusted forever
@@ -138,6 +143,12 @@ impl<K: Eq + Hash + Clone> NodeLedger<K> {
             ARRIVAL_REPLAY_EVICT_AFTER,
             FailureKind::ArrivalReplay,
         )
+    }
+
+    /// [`Self::settle`] for a failed probe whose channel the transport reported
+    /// disconnected: replayed the same way, but the channel is retired at once.
+    pub fn settle_disconnected(&mut self, node: &K, live: Option<DeviceInventory>) -> SettledNode {
+        self.settle_failure(node, live, DISCONNECTED_EVICT_AFTER, FailureKind::Probe)
     }
 
     /// Fold one node's probe result into the ledger and decide what to report.
@@ -475,6 +486,24 @@ mod tests {
             ledger.settle(&1, false, None).evict_channel,
             "a node that keeps failing is still replaced on the next tick"
         );
+    }
+
+    /// A channel the transport reported disconnected can never answer, so its
+    /// first failure retires it — while the devices stay visible from the
+    /// last-good inventory exactly as for any other failure.
+    #[test]
+    fn a_disconnected_channel_is_retired_on_its_first_failure() {
+        let mut ledger = NodeLedger::default();
+        ledger.settle(&1, true, Some(inventory("keyboard")));
+
+        let settled = ledger.settle_disconnected(&1, None);
+
+        assert!(settled.evict_channel);
+        assert_eq!(receiver_name(settled.inventory.as_ref()), Some("keyboard"));
+        // The reopened channel starts its own count: one ordinary failure on
+        // it does not retire it again.
+        ledger.reset_channel_failures_after_open(&1);
+        assert!(!ledger.settle(&1, false, None).evict_channel);
     }
 
     /// Contention on the receiver's register phase is not the channel's

@@ -267,6 +267,13 @@ pub(super) enum ProbeVerdict {
     /// feature walk that never finished): the ledger replays the last-good
     /// snapshot instead of presenting the failure as truth.
     Failed,
+    /// Like [`Self::Failed`], but the node's transport has reported its
+    /// connection gone: no request on this channel can be answered again, so
+    /// the ledger retires it on the first such probe instead of waiting for a
+    /// second. Windows hands a reconnecting Bluetooth device's first open a
+    /// handle that is already disconnected, and waiting out the usual
+    /// threshold on it cost a whole repair pass before the reopen.
+    Disconnected,
     /// The receiver answered a liveness register, but the only operation that
     /// can produce an authoritative device list failed. The ledger may replay
     /// its last-good snapshot briefly, but must eventually reopen the channel.

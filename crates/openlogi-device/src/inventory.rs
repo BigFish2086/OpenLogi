@@ -155,6 +155,7 @@ fn settle_probe<Node: Eq + Hash + Clone>(
     match verdict {
         ProbeVerdict::Deferred => ledger.defer(node),
         ProbeVerdict::AliveButIncomplete => ledger.settle_arrival_replay_failure(node),
+        ProbeVerdict::Disconnected => ledger.settle_disconnected(node, inventory),
         verdict => ledger.settle(node, verdict.is_healthy(), inventory),
     }
 }
