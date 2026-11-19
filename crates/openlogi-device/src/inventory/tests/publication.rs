@@ -317,3 +317,35 @@ async fn a_non_hidpp_node_leaves_the_tick_healthy() {
     );
     assert!(complete, "nothing was left unchecked");
 }
+
+/// A failed channel's reopen is pending from its retirement, through its
+/// drain, until a pass opens the replacement; a node that merely left the
+/// listing is not, since it returns as an ordinary arrival.
+#[test]
+fn a_reopen_is_pending_from_failed_retirement_until_the_replacement_opens() {
+    let mut cache = NodeChannels::default();
+    cache.open(1, Arc::new(()), || true);
+    assert!(!cache.has_pending_reopen());
+
+    let holder = Arc::new(());
+    cache.open(1, Arc::clone(&holder), || true);
+    assert!(cache.evict(&1));
+    assert!(cache.has_pending_reopen(), "retired and still held");
+    assert!(!channel_pass(&mut cache, true));
+    assert!(cache.has_pending_reopen(), "still draining");
+
+    drop(holder);
+    assert!(
+        !channel_pass(&mut cache, true),
+        "the drained pass defers the open"
+    );
+    assert!(cache.has_pending_reopen(), "drained, awaiting the reopen");
+    assert!(channel_pass(&mut cache, true));
+    cache.open(1, Arc::new(()), || true);
+    assert!(!cache.has_pending_reopen());
+
+    let mut absent = NodeChannels::default();
+    absent.open(1, Arc::new(()), || true);
+    assert!(!channel_pass(&mut absent, false));
+    assert!(!absent.has_pending_reopen());
+}

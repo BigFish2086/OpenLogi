@@ -45,6 +45,17 @@ const WAKE_GAP: Duration = Duration::from_mins(1);
 /// the old channel, defer reopen for one pass, and then probe the replacement.
 const FAST_RETRY_LIMIT: u8 = 4;
 
+/// Pause between passes while a channel retired for failing awaits its
+/// reopen. The node reopens only on the pass after its old channel drained,
+/// and at [`FAST_RETRY_DELAY`] that cost a Bluetooth keyboard returning to
+/// Windows 3.4 s idle: retired at once, drained within a second, reopened two
+/// passes later.
+const REOPEN_POLL_DELAY: Duration = Duration::from_millis(300);
+
+/// Polls per pending reopen before the ordinary repair cadence takes over, so
+/// a channel some holder never releases cannot keep passes this frequent.
+const REOPEN_POLL_LIMIT: u8 = 10;
+
 /// One explicit reason for an authoritative reconciliation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReconcileTrigger {
@@ -103,6 +114,7 @@ pub(super) struct Schedule {
     confirmation: Option<Confirmation>,
     recovery_due: Instant,
     retry_count: u8,
+    reopen_polls: u8,
 }
 
 impl Schedule {
@@ -112,7 +124,29 @@ impl Schedule {
             confirmation: None,
             recovery_due: now + RECOVERY_SCAN_PERIOD,
             retry_count: 0,
+            reopen_polls: 0,
         }
+    }
+
+    /// The scan that finished at `finished` left a failed channel awaiting
+    /// its reopen: run the next pass after [`REOPEN_POLL_DELAY`], up to
+    /// [`REOPEN_POLL_LIMIT`] times. Such a pass spends the poll budget, not
+    /// the repair budget [`Self::scan_finished`] just charged it to, so the
+    /// replacement's own repair passes are still there once it opens.
+    pub(super) fn expedite_reopen(&mut self, finished: Instant) {
+        if self.reopen_polls >= REOPEN_POLL_LIMIT {
+            return;
+        }
+        self.reopen_polls += 1;
+        self.retry_count = self.retry_count.saturating_sub(1);
+        let due = finished + REOPEN_POLL_DELAY;
+        self.retry_due = Some(self.retry_due.map_or(due, |at| at.min(due)));
+    }
+
+    /// No failed channel awaits a reopen: the next one gets a fresh poll
+    /// budget.
+    pub(super) fn reopen_settled(&mut self) {
+        self.reopen_polls = 0;
     }
 
     /// Next deadline and its purpose.
@@ -260,6 +294,48 @@ mod tests {
 
         assert!(schedule.retry_due.is_none());
         assert_eq!(schedule.retry_count, FAST_RETRY_LIMIT);
+    }
+
+    /// While a failed channel drains toward its reopen, passes come every
+    /// [`REOPEN_POLL_DELAY`] instead of [`FAST_RETRY_DELAY`], without spending
+    /// the repair budget the replacement may still need — and only
+    /// [`REOPEN_POLL_LIMIT`] times, after which the ordinary cadence and
+    /// budget take over again.
+    #[test]
+    fn a_pending_reopen_polls_fast_without_spending_the_repair_budget() {
+        let start = Instant::now();
+        let mut schedule = Schedule::new(start);
+        let mut finished = start;
+        for _ in 0..REOPEN_POLL_LIMIT {
+            schedule.scan_finished(
+                ReconcileTrigger::RepairRetry,
+                ScanOutcome::Snapshot { needs_repair: true },
+                closed(finished),
+            );
+            schedule.expedite_reopen(finished);
+            let (due, purpose) = schedule.next_deadline();
+            assert_eq!(purpose, DeadlinePurpose::RepairRetry);
+            assert_eq!(due, finished + REOPEN_POLL_DELAY);
+            assert_eq!(schedule.retry_count, 0, "a poll spent the repair budget");
+            finished = due;
+        }
+
+        schedule.scan_finished(
+            ReconcileTrigger::RepairRetry,
+            ScanOutcome::Snapshot { needs_repair: true },
+            closed(finished),
+        );
+        schedule.expedite_reopen(finished);
+        assert_eq!(
+            schedule.next_deadline(),
+            (finished + FAST_RETRY_DELAY, DeadlinePurpose::RepairRetry),
+            "polling outlived its limit"
+        );
+
+        // Once nothing awaits a reopen, the next retirement polls again.
+        schedule.reopen_settled();
+        schedule.expedite_reopen(finished);
+        assert_eq!(schedule.next_deadline().0, finished + REOPEN_POLL_DELAY);
     }
 
     #[test]

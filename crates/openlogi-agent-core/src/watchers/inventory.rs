@@ -601,14 +601,14 @@ impl InventoryWorker {
             debug!("inventory watcher receiver dropped — exiting");
             return false;
         }
-        self.schedule.scan_finished(
-            trigger,
-            outcome,
-            ScanClock {
-                started,
-                finished: Instant::now(),
-            },
-        );
+        let finished = Instant::now();
+        self.schedule
+            .scan_finished(trigger, outcome, ScanClock { started, finished });
+        if self.enumerator.reopen_pending_last_tick() {
+            self.schedule.expedite_reopen(finished);
+        } else {
+            self.schedule.reopen_settled();
+        }
         true
     }
 

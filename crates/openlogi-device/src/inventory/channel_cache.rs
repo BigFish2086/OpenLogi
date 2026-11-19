@@ -168,6 +168,17 @@ impl<Node: Eq + Hash + Clone, Channel> ChannelCache<Node, Channel> {
         }
     }
 
+    /// Whether a channel retired for failing is draining or has drained, so a
+    /// coming pass opens its node's replacement.
+    pub(super) fn has_pending_reopen(&self) -> bool {
+        self.channels.values().any(|state| {
+            matches!(
+                state,
+                ChannelState::Retiring(_, Retirement::Failed) | ChannelState::AwaitingReopen
+            )
+        })
+    }
+
     /// Whether the latest pass opened a replacement no published snapshot
     /// observed.
     pub(super) fn has_replacement(&self) -> bool {

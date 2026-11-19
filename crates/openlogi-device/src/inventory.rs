@@ -369,6 +369,15 @@ impl Enumerator {
         self.channels.has_replacement()
     }
 
+    /// Whether a channel retired for failing probes still awaits its
+    /// replacement after the last pass. A pass reopens such a node only once
+    /// the old channel has drained, and only on the pass after it did, so the
+    /// caller may want those passes sooner than its usual repair cadence.
+    #[must_use]
+    pub fn reopen_pending_last_tick(&self) -> bool {
+        self.channels.has_pending_reopen()
+    }
+
     /// An enumerator that walks `backend` — this host's HID stack, a scripted
     /// device tree in tests, or another host's.
     #[must_use]
