@@ -14,7 +14,10 @@ use windows_sys::Win32::{
         HidD_GetAttributes, HidD_GetPreparsedData, HidD_SetFeature, HidD_SetOutputReport,
         HidP_GetCaps, PHIDP_PREPARSED_DATA,
     },
-    Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE},
+    Foundation::{
+        CloseHandle, ERROR_DEVICE_NOT_CONNECTED, ERROR_FILE_NOT_FOUND, ERROR_NO_SUCH_DEVICE,
+        GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    },
     Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         WriteFile,
@@ -29,6 +32,20 @@ pub(crate) struct NativeHidWriter {
 impl NativeHidWriter {
     pub(crate) fn new(info: &DeviceInfo) -> Option<Self> {
         nul_terminated_path(info).map(|path| Self { path })
+    }
+
+    /// Write `report` with `HidD_SetOutputReport` alone, padded to the
+    /// collection's output length.
+    ///
+    /// The handle is opened for this write, so a device that reconnected under
+    /// the same path is never written through a stale one.
+    pub(crate) fn set_output_report(&self, report: &[u8]) -> Result<(), NativeHidError> {
+        let handle = HidHandle::open(&self.path, GENERIC_READ | GENERIC_WRITE)
+            .map_err(|e| NativeHidError::LastOsError("CreateFileW", e))?;
+        let caps = handle.caps()?;
+        let len = usize::from(caps.OutputReportByteLength).max(report.len());
+        set_output_report(handle.raw(), &padded_report(report, len))
+            .map_err(|e| NativeHidError::LastOsError("HidD_SetOutputReport", e))
     }
 
     pub(crate) fn write_report(&self, report: &[u8]) -> Result<(), NativeHidError> {
@@ -316,4 +333,27 @@ pub(crate) enum NativeHidError {
     HidpStatus(&'static str, i32),
     #[error("{0}: {1}")]
     LastOsError(&'static str, io::Error),
+}
+
+impl NativeHidError {
+    /// Whether the device is gone: the handle reports it disconnected, or its
+    /// path no longer opens. Seen from a Bluetooth LE keyboard that left for
+    /// another host mid-write (`ERROR_DEVICE_NOT_CONNECTED`, then
+    /// `ERROR_FILE_NOT_FOUND` on the next open).
+    pub(crate) fn is_disconnect(&self) -> bool {
+        let Self::LastOsError(_, error) = self else {
+            return false;
+        };
+        error
+            .raw_os_error()
+            .and_then(|code| u32::try_from(code).ok())
+            .is_some_and(|code| {
+                [
+                    ERROR_DEVICE_NOT_CONNECTED,
+                    ERROR_FILE_NOT_FOUND,
+                    ERROR_NO_SUCH_DEVICE,
+                ]
+                .contains(&code)
+            })
+    }
 }

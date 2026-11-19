@@ -149,17 +149,38 @@ fn node_info(info: &DeviceInfo) -> NodeInfo {
 /// empty and the address is only in the device path.
 #[cfg(target_os = "windows")]
 fn bluetooth_le_address(info: &DeviceInfo) -> Option<String> {
-    // `DeviceId` is `#[non_exhaustive]`, so even Windows' only variant needs
-    // the fallback arm.
-    let async_hid::DeviceId::UncPath(path) = &info.id else {
-        return None;
-    };
-    ble_address_from_path(&path.to_string_lossy())
+    ble_address_from_path(&windows_device_path(info)?)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn bluetooth_le_address(_info: &DeviceInfo) -> Option<String> {
     None
+}
+
+/// Whether `info` is a Bluetooth LE (HID-over-GATT) collection.
+#[cfg(target_os = "windows")]
+fn is_hid_over_gatt(info: &DeviceInfo) -> bool {
+    windows_device_path(info).is_some_and(|path| is_hid_over_gatt_path(&path))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_device_path(info: &DeviceInfo) -> Option<String> {
+    // `DeviceId` is `#[non_exhaustive]`, so even Windows' only variant needs
+    // the fallback arm.
+    let async_hid::DeviceId::UncPath(path) = &info.id else {
+        return None;
+    };
+    Some(path.to_string_lossy())
+}
+
+/// How Windows begins a Bluetooth LE HID device's path, lowercased: the
+/// HID-over-GATT service UUID, then the vendor id.
+#[cfg(any(target_os = "windows", test))]
+const HID_OVER_GATT: &str = "{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&";
+
+#[cfg(any(target_os = "windows", test))]
+fn is_hid_over_gatt_path(path: &str) -> bool {
+    path.to_ascii_lowercase().contains(HID_OVER_GATT)
 }
 
 /// Reads the address out of a Windows HID-over-GATT device path, written the
@@ -168,7 +189,6 @@ fn bluetooth_le_address(_info: &DeviceInfo) -> Option<String> {
 /// — the 12 hex digits after the revision are the address.
 #[cfg(any(target_os = "windows", test))]
 fn ble_address_from_path(path: &str) -> Option<String> {
-    const HID_OVER_GATT: &str = "{00001812-0000-1000-8000-00805f9b34fb}_dev_vid&";
     const REVISION: &str = "_rev&";
     let path = path.to_ascii_lowercase();
     let rest = &path[path.find(HID_OVER_GATT)? + HID_OVER_GATT.len()..];

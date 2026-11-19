@@ -184,3 +184,19 @@ fn other_paths_yield_no_bluetooth_address() {
         assert_eq!(ble_address_from_path(path), None, "{path}");
     }
 }
+
+/// Bluetooth LE collections are told apart by their HID-over-GATT path, so
+/// only they take the `HidD_SetOutputReport` write path; a receiver's or a
+/// wired device's USB path keeps `WriteFile`.
+#[test]
+fn only_hid_over_gatt_paths_are_bluetooth_le() {
+    assert!(is_hid_over_gatt_path(
+        r"\\?\HID#{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&02046D_PID&B369_REV&0007_DF79F9294D68&COL03#9&148b8d71&0&0002#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+    ));
+    assert!(!is_hid_over_gatt_path(
+        r"\\?\HID#VID_046D&PID_C548&MI_02&Col02#7&2b1e5c1a&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+    ));
+    assert!(!is_hid_over_gatt_path(
+        r"\\?\HID#VID_046D&PID_C33F&MI_01&Col02#8&1a2b3c4d&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+    ));
+}

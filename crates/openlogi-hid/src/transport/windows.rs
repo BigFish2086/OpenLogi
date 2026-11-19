@@ -164,6 +164,13 @@ fn copy_report(src: &[u8], len: usize, dst: &mut [u8]) -> HidResult<usize> {
 struct ReportWriter {
     writer: Mutex<DeviceWriter>,
     native_writer: Option<NativeHidWriter>,
+    /// The collection belongs to a Bluetooth LE device, whose output reports
+    /// go through `HidD_SetOutputReport` instead of `WriteFile`. Over
+    /// `WriteFile` an MX Keys Mini lost 5–12 requests in the first seconds of
+    /// every return from another host — written without error, never answered
+    /// — while `HidD_SetOutputReport` lost none in three traced returns of
+    /// some 350 writes each.
+    acknowledged: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -172,11 +179,24 @@ impl ReportWriter {
         Self {
             writer: Mutex::new(writer),
             native_writer: NativeHidWriter::new(info),
+            acknowledged: super::is_hid_over_gatt(info),
         }
     }
 
     async fn write_report(&self, src: &[u8]) -> Result<usize, Box<dyn Error + Send + Sync>> {
         let mut writer = self.writer.lock().await;
+        if self.acknowledged
+            && let Some(native_writer) = &self.native_writer
+        {
+            // Still under the writer lock, so writes stay serialised.
+            return match native_writer.set_output_report(src) {
+                Ok(()) => Ok(src.len()),
+                // Typed as async-hid's, so `is_permanent_disconnect` retires
+                // the channel.
+                Err(e) if e.is_disconnect() => Err(Box::new(async_hid::HidError::Disconnected)),
+                Err(e) => Err(Box::new(e)),
+            };
+        }
         if let Err(e) = writer.write_output_report(src).await {
             // The native fallback works around async-hid write quirks on a
             // *live* device; reopening a device that is gone can only fail, and
